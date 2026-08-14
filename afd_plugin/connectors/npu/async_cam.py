@@ -291,6 +291,10 @@ class CAMAsyncAFDConnector(AFDConnectorBase):
         )
         backend = self.cam_pg._get_backend(torch.device("npu"))
         self.group_name = str(backend.get_hccl_comm_name(self.world_rank))
+        self.init_recovery_channel(
+            world_rank=self.world_rank,
+            world_size=self.topology.world_size,
+        )
         device = f"npu:{self.local_rank}"
         self.comm_args = torch.empty((1,), dtype=torch.float16, device=device)
         self._placeholder = torch.empty(
@@ -302,6 +306,7 @@ class CAMAsyncAFDConnector(AFDConnectorBase):
 
     def close(self) -> None:
         """Destroy the HCCL process group and clear pending transfer states."""
+        self.close_recovery_channel()
         if self.cam_pg is not None:
             import torch.distributed as dist
 

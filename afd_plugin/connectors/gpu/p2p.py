@@ -211,6 +211,7 @@ class P2pNcclAFDConnector(AFDConnectorBase):
         shuts the ``PyNcclCommunicator`` instances down, and marks the
         connector uninitialized. Safe to call repeatedly.
         """
+        self.close_recovery_channel()
         for comm_id_name in ("a2e_comm_id", "e2a_comm_id"):
             comm_id = getattr(self, comm_id_name, None)
             if comm_id is not None:
@@ -255,6 +256,10 @@ class P2pNcclAFDConnector(AFDConnectorBase):
             rank=self.world_rank,
             group_name="afd",
             timeout=timedelta(minutes=2),
+        )
+        self.init_recovery_channel(
+            world_rank=self.world_rank,
+            world_size=self.ffn_size + self.attn_size,
         )
 
         with DefaultProcessGroupSwitcher(_get_default_group(), afd_pg):

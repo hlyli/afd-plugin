@@ -32,6 +32,7 @@ from afd_plugin.connectors import (
     AFDForwardContextMetadata,
     AFDTransferContext,
 )
+from afd_plugin.recovery import FFNForwardFaultInjector
 from afd_plugin.v1.worker.attention_model_runner import (
     _resolve_world_ranks,
 )
@@ -72,6 +73,10 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
             local_rank,
             vllm_config,
             self.afd_config,
+        )
+        self.fault_injector = FFNForwardFaultInjector(
+            self.afd_config,
+            self.connector.role_rank,
         )
         self.num_layers = int(self.model_config.hf_config.num_hidden_layers)
         self.use_aclgraph = _use_npu_aclgraph(vllm_config, self)
@@ -257,6 +262,7 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
                     assert states, "Context.states must not be None"
                     _set_moe_layer_index(forward_context, layer_idx)
 
+                    _inject_ffn_failure_before_forward(self)
                     rank_ffn_output = self.model.compute_ffn_output(
                         hidden_states=hidden_states,
                         layer_idx=layer_idx,
@@ -313,6 +319,7 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
                 forward_context.additional_kwargs["afd_metadata"] = metadata
                 _set_moe_layer_index(forward_context, layer_idx)
 
+                _inject_ffn_failure_before_forward(self)
                 rank_ffn_output = self.model.compute_ffn_output(
                     hidden_states=hidden_states,
                     layer_idx=layer_idx,
@@ -583,6 +590,12 @@ def _use_npu_aclgraph(vllm_config: VllmConfig, runner: object) -> bool:
         "FULL_DECODE_ONLY",
         "PIECEWISE",
     }
+
+
+def _inject_ffn_failure_before_forward(runner: object) -> None:
+    fault_injector = getattr(runner, "fault_injector", None)
+    if fault_injector is not None:
+        fault_injector.before_forward()
 
 
 __all__ = ["AFDNPUFFNModelRunner"]

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.distributed as dist
 
 from afd_plugin.config import AFDConfig, connector_extra_config_from_source
 from afd_plugin.connectors.metadata import (
@@ -20,6 +21,8 @@ from afd_plugin.connectors.metadata import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+    from afd_plugin.recovery import AFDRecoveryChannel
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,42 @@ class AFDConnectorBase(ABC):
         self.extra_info = self.parse_extra_config(
             connector_extra_config_from_source(vllm_config),
         )
+        self.recovery_channel: AFDRecoveryChannel | None = None
+
+    def init_recovery_channel(self, *, world_rank: int, world_size: int) -> None:
+        """Create the all-rank CPU recovery channel for this connector."""
+
+        if getattr(self, "recovery_channel", None) is not None:
+            return
+        from datetime import timedelta
+
+        from afd_plugin.distributed import init_afd_process_group
+        from afd_plugin.recovery import AFDRecoveryChannel
+
+        recovery_group = init_afd_process_group(
+            backend="gloo",
+            init_method=f"tcp://{self.afd_config.host}:{self.afd_config.port}",
+            world_size=world_size,
+            rank=world_rank,
+            group_name="afd_recovery",
+            timeout=timedelta(minutes=2),
+        )
+        self.recovery_channel = AFDRecoveryChannel(
+            recovery_group,
+            world_rank=world_rank,
+            world_size=world_size,
+        )
+        self.recovery_channel.start()
+
+    def close_recovery_channel(self) -> None:
+        """Stop the listener and release its plugin-owned Gloo group."""
+
+        channel = getattr(self, "recovery_channel", None)
+        if channel is None:
+            return
+        channel.close()
+        dist.destroy_process_group(channel.process_group)
+        self.recovery_channel = None
 
     # ==============================
     # Lifecycle methods

@@ -75,6 +75,29 @@ def test_compute_gate_on_attention_is_common_config():
     assert config.compute_gate_on_attention is True
 
 
+def test_fault_injection_ffn_rank_is_optional_common_config():
+    config = afd_config_from_mapping(
+        {
+            "num_attention_ranks": 2,
+            "num_ffn_ranks": 2,
+            "fault_injection_ffn_rank": "1",
+        },
+    )
+
+    assert config.fault_injection_ffn_rank == 1
+
+
+def test_fault_injection_ffn_rank_must_be_configured():
+    with pytest.raises(ValueError, match="must identify a configured FFN rank"):
+        afd_config_from_mapping(
+            {
+                "num_attention_ranks": 2,
+                "num_ffn_ranks": 2,
+                "fault_injection_ffn_rank": 2,
+            },
+        )
+
+
 def test_common_config_coerces_integer_bool_values():
     assert (
         afd_config_from_mapping(

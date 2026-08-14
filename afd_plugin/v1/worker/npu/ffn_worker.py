@@ -19,6 +19,11 @@ from afd_plugin.compat.npu import (
     npu_afd_num_ubatches,
 )
 from afd_plugin.model_executor.models.model_utils import get_afd_model_config
+from afd_plugin.recovery import (
+    AFDFailureNotice,
+    FailedAFDRank,
+    InjectedFFNForwardFailure,
+)
 from afd_plugin.v1.worker.npu.ffn_model_runner import AFDNPUFFNModelRunner
 from afd_plugin.validation import NPU_FFN_WORKER_FQCN, assert_compatible_afd_stack
 
@@ -97,6 +102,10 @@ class AFDNPUFFNWorker(NPUWorker):
         def ffn_worker_loop() -> None:
             try:
                 self._run_ffn_server_loop()
+            except InjectedFFNForwardFailure as exc:
+                self._report_injected_failure()
+                self._ffn_loop_error = exc
+                logger.exception("Injected AFD NPU FFN worker failure")
             except Exception as exc:
                 self._ffn_loop_error = exc
                 logger.exception("AFD NPU FFN worker loop failed")
@@ -107,6 +116,21 @@ class AFDNPUFFNWorker(NPUWorker):
             daemon=True,
         )
         self._ffn_thread.start()
+
+    def _report_injected_failure(self) -> None:
+        connector = self.model_runner.connector
+        channel = connector.recovery_channel
+        if channel is None:
+            logger.error("Injected NPU FFN failure has no recovery channel")
+            return
+        latest_notice = channel.latest_notice
+        next_epoch = 1 if latest_notice is None else latest_notice.epoch + 1
+        channel.report_failure(
+            AFDFailureNotice(
+                epoch=next_epoch,
+                failed_rank=FailedAFDRank("ffn", connector.role_rank),
+            ),
+        )
 
     def _run_ffn_server_loop(self) -> None:
         event = self._ffn_shutdown_event

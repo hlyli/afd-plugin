@@ -28,6 +28,7 @@ from afd_plugin.connectors import (
     AFDControlPayload,
     AFDDPMetadata,
 )
+from afd_plugin.recovery import FFNForwardFaultInjector
 from afd_plugin.v1.worker.attention_model_runner import (
     fail_if_unsupported_ubatching,
 )
@@ -73,6 +74,10 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
             local_rank,
             vllm_config,
             self.afd_config,
+        )
+        self.fault_injector = FFNForwardFaultInjector(
+            self.afd_config,
+            self.connector.role_rank,
         )
         # TODO: Async GPU connector will be supported in the future
         assert self.connector.control_plane is not None, (
@@ -197,6 +202,9 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         layer_idx: int,
     ) -> torch.Tensor:
+        fault_injector = getattr(self, "fault_injector", None)
+        if fault_injector is not None:
+            fault_injector.before_forward()
         model = self.model
         compute = getattr(model, "compute_ffn_output", None)
         if callable(compute):

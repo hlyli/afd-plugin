@@ -61,6 +61,9 @@ class AFDConfig:
     num_ffn_ranks: int = 1
     # Whether Attention computes MoE gate outputs before sending to FFN.
     compute_gate_on_attention: bool = False
+    # Development-only physical FFN role rank that raises once immediately
+    # before model forward. ``None`` disables fault injection.
+    fault_injection_ffn_rank: int | None = None
 
     @property
     def afd_connector(self) -> str:
@@ -139,8 +142,9 @@ def _normalize_mapping(
         "port",
         "num_attention_ranks",
         "num_ffn_ranks",
+        "fault_injection_ffn_rank",
     ):
-        if field_name in normalized:
+        if field_name in normalized and normalized[field_name] is not None:
             normalized[field_name] = _coerce_int(
                 normalized[field_name],
                 field_name=field_name,
@@ -326,6 +330,14 @@ def validate_afd_config(
     if config.num_ffn_ranks <= 0:
         raise ValueError(
             f"num_ffn_ranks must be positive, got {config.num_ffn_ranks}",
+        )
+    if config.fault_injection_ffn_rank is not None and not (
+        0 <= config.fault_injection_ffn_rank < config.num_ffn_ranks
+    ):
+        raise ValueError(
+            "fault_injection_ffn_rank must identify a configured FFN rank, "
+            f"got {config.fault_injection_ffn_rank} for "
+            f"num_ffn_ranks={config.num_ffn_ranks}",
         )
 
 

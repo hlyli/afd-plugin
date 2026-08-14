@@ -338,6 +338,11 @@ class CAMP2pAFDConnector(AFDConnectorBase):
         )
         self.hccl_comm_name3 = self.hccl_comm_name_list[2] if num_ubatches > 2 else ""
 
+        self.init_recovery_channel(
+            world_rank=self.world_rank,
+            world_size=self.ffn_size + self.attn_size,
+        )
+
         if self.afd_config.role == "ffn":
             self.ffn_pg = init_afd_process_group(
                 backend="hccl",
@@ -370,6 +375,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
         The method also clears saved HCCL group names and marks the connector as
         uninitialized. It is safe to initialize the connector again afterward.
         """
+        self.close_recovery_channel()
         groups = [self.p2p_pg, self.ffn_pg, *self.afd_pg_list]
         if self.afd_pg is not None and not self.afd_pg_list:
             groups.append(self.afd_pg)
