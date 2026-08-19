@@ -73,6 +73,27 @@ def test_coordinator_rejects_overlapping_recovery():
         coordinator.begin_recovery(FailedAFDRank("ffn", 1), reason="second")
 
 
+def test_coordinator_accepts_duplicate_notice_idempotently():
+    coordinator = AFDRecoveryCoordinator(_topology())
+    failed_rank = FailedAFDRank("ffn", 0)
+
+    first = coordinator.begin_recovery(failed_rank, reason="first", epoch=1)
+    duplicate = coordinator.begin_recovery(failed_rank, reason="duplicate", epoch=1)
+
+    assert duplicate is first
+
+
+def test_coordinator_rejects_notice_for_wrong_epoch():
+    coordinator = AFDRecoveryCoordinator(_topology())
+
+    with pytest.raises(ValueError, match="expected 1"):
+        coordinator.begin_recovery(
+            FailedAFDRank("ffn", 0),
+            reason="stale",
+            epoch=2,
+        )
+
+
 def test_coordinator_records_terminal_recovery_failure():
     coordinator = AFDRecoveryCoordinator(_topology())
     coordinator.begin_recovery(FailedAFDRank("ffn", 0), reason="timeout")

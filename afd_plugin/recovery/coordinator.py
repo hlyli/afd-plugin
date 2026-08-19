@@ -50,18 +50,31 @@ class AFDRecoveryCoordinator:
         failed_rank: FailedAFDRank,
         *,
         reason: str,
+        epoch: int | None = None,
     ) -> RecoverySnapshot:
         """Begin recovery and compute, but do not publish, new membership."""
 
         if not reason.strip():
             raise ValueError("AFD recovery reason must not be empty")
         with self._condition:
+            current = self._snapshot
+            if (
+                current.phase is RecoveryPhase.QUIESCING
+                and current.failed_rank == failed_rank
+                and (epoch is None or epoch == current.topology.epoch + 1)
+            ):
+                return current
             self._require_phase(RecoveryPhase.RUNNING)
+            expected_epoch = current.topology.epoch + 1
+            if epoch is not None and epoch != expected_epoch:
+                raise ValueError(
+                    f"stale AFD recovery epoch {epoch}; expected {expected_epoch}",
+                )
             # Validate the rank before changing observable state.
-            self._snapshot.topology.without_rank(failed_rank)
+            current.topology.without_rank(failed_rank)
             self._snapshot = RecoverySnapshot(
                 RecoveryPhase.QUIESCING,
-                self._snapshot.topology,
+                current.topology,
                 failed_rank,
                 reason,
             )

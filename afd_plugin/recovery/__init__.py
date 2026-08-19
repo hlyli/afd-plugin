@@ -14,8 +14,14 @@ from afd_plugin.recovery.fault_injection import (
 )
 from afd_plugin.recovery.topology import AFDRuntimeTopology, FailedAFDRank
 
+
+class AFDRecoveryQuiescing(RuntimeError):
+    """Raised before new AFD work when recovery has requested quiescence."""
+
+
 __all__ = [
     "AFDRecoveryCoordinator",
+    "AFDRecoveryQuiescing",
     "AFDFailureNotice",
     "AFDRecoveryChannel",
     "AFDRuntimeTopology",

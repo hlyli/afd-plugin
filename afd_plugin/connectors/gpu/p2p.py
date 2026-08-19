@@ -320,6 +320,7 @@ class P2pNcclAFDConnector(AFDConnectorBase):
                 tensor is on CPU.
             RuntimeError: If the connector is not initialized.
         """
+        self.ensure_recovery_running()
         metadata = context.metadata
         if not torch.compiler.is_compiling() and not metadata.validate_tensor_shape(
             tuple(hidden_states.shape),
@@ -358,6 +359,7 @@ class P2pNcclAFDConnector(AFDConnectorBase):
             RuntimeError: If the connector is not initialized, or no receive
                 is performed for a single-rank subgroup.
         """
+        self.ensure_recovery_running()
         output = self._recv_hidden_states(
             0,
             self.e2a_group,
@@ -398,6 +400,7 @@ class P2pNcclAFDConnector(AFDConnectorBase):
             RuntimeError: If the connector is not initialized or the subgroup
                 has no Attention peers.
         """
+        self.ensure_recovery_running()
         hidden_states_list: list[torch.Tensor] = []
 
         for src in range(1, self.group_size):
@@ -466,6 +469,7 @@ class P2pNcclAFDConnector(AFDConnectorBase):
                 ``seq_lens`` is unusable.
             RuntimeError: If the connector is not initialized.
         """
+        self.ensure_recovery_running()
         metadata = context.metadata
         if not torch.compiler.is_compiling() and not metadata.validate_tensor_shape(
             tuple(ffn_output.shape),

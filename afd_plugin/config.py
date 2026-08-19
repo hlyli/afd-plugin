@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 AFD_ADDITIONAL_CONFIG_KEY: Final[str] = "afd"
 AFD_ASYNC_CONNECTOR: Final[str] = "CAMAsyncAFDConnector"
 AFDRole = Literal["attention", "ffn"]
+FaultInjectionPhase = Literal["before_forward", "before_step"]
 
 SUPPORTED_AFD_ROLES: Final[tuple[str, ...]] = ("attention", "ffn")
 SUPPORTED_AFD_CONNECTORS: Final[tuple[str, ...]] = (
@@ -61,9 +62,12 @@ class AFDConfig:
     num_ffn_ranks: int = 1
     # Whether Attention computes MoE gate outputs before sending to FFN.
     compute_gate_on_attention: bool = False
-    # Development-only physical FFN role rank that raises once immediately
-    # before model forward. ``None`` disables fault injection.
+    # Development-only physical FFN role rank that raises once at the selected
+    # injection phase. ``None`` disables fault injection.
     fault_injection_ffn_rank: int | None = None
+    # ``before_step`` notifies before the FFN loop accepts new work and is the
+    # deterministic safe-boundary mode for recovery tests.
+    fault_injection_phase: FaultInjectionPhase = "before_forward"
 
     @property
     def afd_connector(self) -> str:
@@ -339,6 +343,19 @@ def validate_afd_config(
             f"got {config.fault_injection_ffn_rank} for "
             f"num_ffn_ranks={config.num_ffn_ranks}",
         )
+    if (
+        config.fault_injection_ffn_rank is not None
+        and config.num_ffn_ranks < 2
+    ):
+        raise ValueError(
+            "FFN fault injection requires at least two FFN ranks so one "
+            "surviving rank remains",
+        )
+    if config.fault_injection_phase not in {"before_forward", "before_step"}:
+        raise ValueError(
+            "fault_injection_phase must be 'before_forward' or 'before_step', "
+            f"got {config.fault_injection_phase!r}",
+        )
 
 
 __all__ = [
@@ -347,6 +364,7 @@ __all__ = [
     "afd_config_from_mapping",
     "AFD_ADDITIONAL_CONFIG_KEY",
     "AFDRole",
+    "FaultInjectionPhase",
     "SUPPORTED_AFD_CONNECTORS",
     "SUPPORTED_AFD_ROLES",
     "connector_extra_config_from_mapping",

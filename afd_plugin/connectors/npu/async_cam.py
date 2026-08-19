@@ -486,6 +486,7 @@ class CAMAsyncAFDConnector(AFDConnectorBase):
         for ``recv_ffn_output``. The input token count and top-k tensor shapes
         must match the transfer metadata and model configuration.
         """
+        self.ensure_recovery_running()
         self._require_initialized()
         metadata = context.metadata
         if not metadata.validate_tensor_shape(tuple(hidden_states.shape)):
@@ -588,6 +589,7 @@ class CAMAsyncAFDConnector(AFDConnectorBase):
                 * ``topk_weights``: Expert routing weights. Recovered from
                   the pending queue when omitted.
         """
+        self.ensure_recovery_running()
         self._require_initialized()
         context = kwargs.get("context")
         topk_ids = kwargs.get("topk_ids")
@@ -670,6 +672,7 @@ class CAMAsyncAFDConnector(AFDConnectorBase):
         local expert execution and the subsequent combine-send use the same
         routing contract.
         """
+        self.ensure_recovery_running()
         self._require_initialized()
         batch_size = int(kwargs.get("batch_size", self.max_seq_len) or 1)
         layer_idx = int(kwargs.get("layer_idx", 0) or 0)
@@ -765,6 +768,7 @@ class CAMAsyncAFDConnector(AFDConnectorBase):
         ``TokenNums_Rankid_Layeridx`` from the matching dispatch-recv is
         mandatory because CAM uses it to return results to Attention ranks.
         """
+        self.ensure_recovery_running()
         self._require_initialized()
         states = context.states
         expand_x_shared = kwargs.get("expand_x_shared")

@@ -42,3 +42,17 @@ def test_disabled_fault_injector_does_not_raise():
     injector = FFNForwardFaultInjector(AFDConfig(), physical_rank=0)
 
     injector.before_forward()
+
+
+def test_safe_boundary_injector_raises_before_step_only():
+    injector = FFNForwardFaultInjector(
+        AFDConfig(
+            fault_injection_ffn_rank=0,
+            fault_injection_phase="before_step",
+        ),
+        physical_rank=0,
+    )
+
+    injector.before_forward()
+    with pytest.raises(InjectedFFNForwardFailure, match="before step"):
+        injector.before_step()

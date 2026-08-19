@@ -98,6 +98,22 @@ def test_fault_injection_ffn_rank_must_be_configured():
         )
 
 
+def test_fault_injection_phase_supports_safe_boundary():
+    config = afd_config_from_mapping({"fault_injection_phase": "before_step"})
+
+    assert config.fault_injection_phase == "before_step"
+
+
+def test_fault_injection_requires_a_surviving_ffn_rank():
+    with pytest.raises(ValueError, match="at least two FFN ranks"):
+        afd_config_from_mapping({"fault_injection_ffn_rank": 0})
+
+
+def test_fault_injection_phase_rejects_unknown_value():
+    with pytest.raises(ValueError, match="fault_injection_phase"):
+        afd_config_from_mapping({"fault_injection_phase": "during_forward"})
+
+
 def test_common_config_coerces_integer_bool_values():
     assert (
         afd_config_from_mapping(

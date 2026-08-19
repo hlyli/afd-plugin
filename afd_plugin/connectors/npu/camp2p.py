@@ -421,6 +421,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
             ValueError: If the number of tokens in ``hidden_states`` does not
                 match ``context.metadata`` outside a ``torch.compile`` trace.
         """
+        self.ensure_recovery_running()
         if not self._initialized:
             raise RuntimeError("CAMP2P connector is not initialized")
         metadata = context.metadata
@@ -479,6 +480,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
             RuntimeError: If communication is not ready or the matching
                 Attention send information was lost.
         """
+        self.ensure_recovery_running()
         if not self._initialized:
             raise RuntimeError("CAMP2P connector is not initialized")
         transfer_state = getattr(get_forward_context(), "cam_afdtransfer_state", None)
@@ -521,6 +523,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
             RuntimeError: If communication is not ready, transfer information
                 is missing, or the requested ubatch group does not exist.
         """
+        self.ensure_recovery_running()
         if not self._initialized:
             raise RuntimeError("CAMP2P connector is not initialized")
         layer_idx: int = kwargs.get("layer_idx", 0)
@@ -596,6 +599,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
             RuntimeError: If communication is not ready, required receive
                 information is missing, or the ubatch group does not exist.
         """
+        self.ensure_recovery_running()
         if not self._initialized:
             raise RuntimeError("CAMP2P connector is not initialized")
         states = context.states

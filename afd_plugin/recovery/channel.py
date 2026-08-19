@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -52,6 +53,8 @@ class AFDRecoveryChannel:
         *,
         world_rank: int,
         world_size: int,
+        notice_callback: Callable[[AFDFailureNotice], None] | None = None,
+        poll_interval_seconds: float = RECOVERY_LISTENER_POLL_SECONDS,
     ) -> None:
         if not 0 <= world_rank < world_size:
             raise ValueError(
@@ -60,6 +63,10 @@ class AFDRecoveryChannel:
         self.process_group = process_group
         self.world_rank = world_rank
         self.world_size = world_size
+        if poll_interval_seconds <= 0:
+            raise ValueError("recovery poll interval must be positive")
+        self.poll_interval_seconds = poll_interval_seconds
+        self.notice_callback = notice_callback
         self.failure_event = threading.Event()
         self._shutdown_event = threading.Event()
         self._notice_lock = threading.Lock()
@@ -118,17 +125,23 @@ class AFDRecoveryChannel:
                     break
                 elif event != 0:
                     raise ValueError(f"unknown AFD recovery event {event}")
-                self._shutdown_event.wait(RECOVERY_LISTENER_POLL_SECONDS)
+                self._shutdown_event.wait(self.poll_interval_seconds)
         except Exception:
             if not self._shutdown_event.is_set():
                 logger.exception("AFD recovery listener failed")
 
     def _record_notice(self, notice: AFDFailureNotice) -> None:
+        notify = False
         with self._notice_lock:
             current = self._latest_notice
-            if current is None or notice.epoch >= current.epoch:
+            if current is None or notice.epoch > current.epoch:
                 self._latest_notice = notice
                 self.failure_event.set()
+                notify = True
+            elif notice == current:
+                self.failure_event.set()
+        if notify and self.notice_callback is not None:
+            self.notice_callback(notice)
 
 
 def encode_failure_notice(notice: AFDFailureNotice) -> torch.Tensor:

@@ -21,6 +21,7 @@ from afd_plugin.compat.npu import (
 from afd_plugin.model_executor.models.model_utils import get_afd_model_config
 from afd_plugin.recovery import (
     AFDFailureNotice,
+    AFDRecoveryQuiescing,
     FailedAFDRank,
     InjectedFFNForwardFailure,
 )
@@ -104,8 +105,15 @@ class AFDNPUFFNWorker(NPUWorker):
                 self._run_ffn_server_loop()
             except InjectedFFNForwardFailure as exc:
                 self._report_injected_failure()
-                self._ffn_loop_error = exc
-                logger.exception("Injected AFD NPU FFN worker failure")
+                if exc.phase == "before_step":
+                    logger.warning(
+                        "AFD NPU FFN worker injected safe-boundary failure",
+                    )
+                else:
+                    self._ffn_loop_error = exc
+                    logger.exception("Injected AFD NPU FFN worker failure")
+            except AFDRecoveryQuiescing:
+                logger.info("AFD NPU FFN worker quiesced for recovery")
             except Exception as exc:
                 self._ffn_loop_error = exc
                 logger.exception("AFD NPU FFN worker loop failed")
@@ -139,6 +147,8 @@ class AFDNPUFFNWorker(NPUWorker):
 
         torch.npu.set_device(self.device)
         while not event.is_set():
+            self.model_runner.fault_injector.before_step()
+            self.model_runner.connector.ensure_recovery_running()
             if self.model_runner.connector.control_plane is None:
                 self.model_runner.execute_connector_driven_step()
                 torch.npu.synchronize()

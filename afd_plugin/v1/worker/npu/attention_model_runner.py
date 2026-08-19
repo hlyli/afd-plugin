@@ -1274,6 +1274,7 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
         dp_metadata: DPMetadata | AFDDPMetadata | None,
         ubatch_slices: Any,
     ) -> None:
+        self.connector.ensure_recovery_running()
         assert self.connector.control_plane is not None, (
             "_send_dp_metadata needs control plane driven connectors"
         )

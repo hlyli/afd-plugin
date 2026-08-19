@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu_worker import Worker
 from afd_plugin.model_executor.models.model_utils import get_afd_model_config
 from afd_plugin.recovery import (
     AFDFailureNotice,
+    AFDRecoveryQuiescing,
     FailedAFDRank,
     InjectedFFNForwardFailure,
 )
@@ -114,8 +115,13 @@ class AFDFFNWorker(Worker):
                 self._run_ffn_server_loop()
             except InjectedFFNForwardFailure as exc:
                 self._report_injected_failure()
-                self._ffn_loop_error = exc
-                logger.exception("Injected AFD FFN worker failure")
+                if exc.phase == "before_step":
+                    logger.warning("AFD FFN worker injected safe-boundary failure")
+                else:
+                    self._ffn_loop_error = exc
+                    logger.exception("Injected AFD FFN worker failure")
+            except AFDRecoveryQuiescing:
+                logger.info("AFD FFN worker quiesced for recovery")
             except Exception as exc:
                 self._ffn_loop_error = exc
                 logger.exception("AFD FFN worker loop failed")
@@ -151,6 +157,8 @@ class AFDFFNWorker(Worker):
             torch.cuda.set_device(self.device)
 
         while not event.is_set():
+            self.model_runner.fault_injector.before_step()
+            self.model_runner.connector.ensure_recovery_running()
             if self.model_runner.connector.control_plane is None:
                 raise NotImplementedError(
                     "GPU FFN only supports control-plane-driven connectors; "

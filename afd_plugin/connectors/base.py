@@ -18,11 +18,17 @@ from afd_plugin.connectors.metadata import (
     AFDControlPayload,
     AFDTransferContext,
 )
+from afd_plugin.recovery import (
+    AFDFailureNotice,
+    AFDRecoveryChannel,
+    AFDRecoveryCoordinator,
+    AFDRecoveryQuiescing,
+    AFDRuntimeTopology,
+    RecoveryPhase,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-    from afd_plugin.recovery import AFDRecoveryChannel
 
 
 @dataclass(frozen=True)
@@ -109,6 +115,9 @@ class AFDConnectorBase(ABC):
             connector_extra_config_from_source(vllm_config),
         )
         self.recovery_channel: AFDRecoveryChannel | None = None
+        self.recovery_coordinator: AFDRecoveryCoordinator = AFDRecoveryCoordinator(
+            AFDRuntimeTopology.from_config(afd_config),
+        )
 
     def init_recovery_channel(self, *, world_rank: int, world_size: int) -> None:
         """Create the all-rank CPU recovery channel for this connector."""
@@ -118,8 +127,6 @@ class AFDConnectorBase(ABC):
         from datetime import timedelta
 
         from afd_plugin.distributed import init_afd_process_group
-        from afd_plugin.recovery import AFDRecoveryChannel
-
         recovery_group = init_afd_process_group(
             backend="gloo",
             init_method=f"tcp://{self.afd_config.host}:{self.afd_config.port}",
@@ -132,8 +139,30 @@ class AFDConnectorBase(ABC):
             recovery_group,
             world_rank=world_rank,
             world_size=world_size,
+            notice_callback=self._on_failure_notice,
         )
         self.recovery_channel.start()
+
+    def _on_failure_notice(self, notice: AFDFailureNotice) -> None:
+        """Move local execution to quiescing for an authoritative notice."""
+        self.recovery_coordinator.begin_recovery(
+            notice.failed_rank,
+            reason="failure notice received",
+            epoch=notice.epoch,
+        )
+
+    def ensure_recovery_running(self) -> None:
+        """Reject new connector work after recovery requests quiescence."""
+
+        snapshot = self.recovery_coordinator.snapshot()
+        if snapshot.phase is not RecoveryPhase.RUNNING:
+            recovery_epoch = snapshot.topology.epoch
+            if snapshot.phase is RecoveryPhase.QUIESCING:
+                recovery_epoch += 1
+            raise AFDRecoveryQuiescing(
+                f"AFD rank is {snapshot.phase.value} for recovery epoch "
+                f"{recovery_epoch}",
+            )
 
     def close_recovery_channel(self) -> None:
         """Stop the listener and release its plugin-owned Gloo group."""
