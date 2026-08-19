@@ -16,8 +16,9 @@ examples.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
+from threading import RLock
 from typing import TYPE_CHECKING, Any, Final
 
 import torch
@@ -51,6 +52,7 @@ from afd_plugin.connectors.metadata import (
     send_control_payload,
 )
 from afd_plugin.distributed import init_afd_process_group, topology_from_config
+from afd_plugin.recovery import AFDFailureNotice, AFDRuntimeTopology
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -256,6 +258,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
         """
         super().__init__(rank, local_rank, vllm_config, afd_config, role_rank)
         self._initialized = False
+        self._data_plane_lock = RLock()
         self.topology = build_camp2p_topology(afd_config, role_rank)
         self.world_rank = self.topology.world_rank
         self.p2p_rank = self.topology.p2p_rank
@@ -313,11 +316,20 @@ class CAMP2pAFDConnector(AFDConnectorBase):
 
         _register_camp2p_custom_ops()
 
+        self._init_data_plane(epoch=0)
+        self.init_recovery_channel(
+            world_rank=self.world_rank,
+            world_size=self.ffn_size + self.attn_size,
+        )
+
+    def _init_data_plane(self, *, epoch: int) -> None:
+        """Create CAMP2P groups using the unchanged launch-time rank layout."""
+
         num_ubatches = max(1, self.vllm_config.parallel_config.num_ubatches)
         self.afd_pg_list = []
         self.hccl_comm_name_list = []
         for ubatch_idx in range(num_ubatches):
-            group_name = "afd" if ubatch_idx == 0 else f"afd{ubatch_idx}"
+            group_name = _camp2p_group_name("afd", epoch, ubatch_idx)
             afd_pg = init_afd_process_group(
                 backend="hccl",
                 init_method=f"tcp://{self.afd_config.host}:{self.afd_config.port}",
@@ -338,18 +350,13 @@ class CAMP2pAFDConnector(AFDConnectorBase):
         )
         self.hccl_comm_name3 = self.hccl_comm_name_list[2] if num_ubatches > 2 else ""
 
-        self.init_recovery_channel(
-            world_rank=self.world_rank,
-            world_size=self.ffn_size + self.attn_size,
-        )
-
         if self.afd_config.role == "ffn":
             self.ffn_pg = init_afd_process_group(
                 backend="hccl",
                 init_method=f"tcp://{self.afd_config.host}:{self.afd_config.port}",
                 world_size=self.ffn_size,
                 rank=self.world_rank,
-                group_name="afd_moe",
+                group_name=_camp2p_group_name("afd_moe", epoch),
                 timeout=timedelta(minutes=30),
             )
             backend = self.ffn_pg._get_backend(torch.device("npu"))
@@ -363,40 +370,83 @@ class CAMP2pAFDConnector(AFDConnectorBase):
                 init_method=f"tcp://{self.afd_config.host}:{self.afd_config.port}",
                 world_size=self.topology.p2p_world_size,
                 rank=self.p2p_rank,
-                group_name="p2p",
+                group_name=_camp2p_group_name("p2p", epoch),
                 timeout=timedelta(minutes=30),
             )
 
         self._initialized = True
 
-    def close(self) -> None:
-        """Close all communication groups created by this connector.
+    def _close_data_plane(self) -> None:
+        """Close CAMP2P groups while leaving recovery coordination alive.
 
         The method also clears saved HCCL group names and marks the connector as
         uninitialized. It is safe to initialize the connector again afterward.
         """
+        with self._data_plane_lock:
+            groups = [self.p2p_pg, self.ffn_pg, *self.afd_pg_list]
+            if self.afd_pg is not None and not self.afd_pg_list:
+                groups.append(self.afd_pg)
+            destroyed_group_ids: set[int] = set()
+            for group in groups:
+                if group is not None:
+                    group_id = id(group)
+                    if group_id in destroyed_group_ids:
+                        continue
+                    destroyed_group_ids.add(group_id)
+                    dist.destroy_process_group(group)
+            self.p2p_pg = None
+            self.ffn_pg = None
+            self.afd_pg = None
+            self.afd_pg_list = []
+            self.hccl_comm_name = ""
+            self.hccl_comm_name2 = ""
+            self.hccl_comm_name3 = ""
+            self.hccl_comm_name1 = ""
+            self.hccl_comm_name_list = []
+            self.dp_metadata_list = {}
+            self._initialized = False
+
+    def _on_failure_notice(self, notice: AFDFailureNotice) -> None:
+        """Recreate CAMP2P groups with the failed rank excluded."""
+
+        super()._on_failure_notice(notice)
+        try:
+            self._close_data_plane()
+            snapshot = self.recovery_coordinator.mark_quiesced()
+            epoch = snapshot.topology.epoch
+            runtime_topology = build_camp2p_runtime_topology(
+                self.afd_config,
+                self.role_rank,
+                snapshot.topology,
+            )
+            if runtime_topology is not None:
+                self._apply_topology(runtime_topology)
+                self._init_data_plane(epoch=epoch)
+            self.recovery_coordinator.mark_reconfigured(epoch)
+            self.recovery_coordinator.mark_resumed(epoch)
+        except Exception as exc:
+            self.recovery_coordinator.mark_failed(
+                f"CAMP2P group recreation failed: {exc}",
+            )
+            raise
+
+    def _apply_topology(self, topology: _CAMP2PTopology) -> None:
+        """Apply compact communication ranks without changing physical identity."""
+
+        self.topology = topology
+        self.world_rank = topology.world_rank
+        self.p2p_rank = topology.p2p_rank
+        self.attn_size = topology.attention_size
+        self.ffn_size = topology.ffn_size
+        self.min_size = topology.min_size
+        self.ratio = self.attn_size // self.ffn_size
+        self.dst_list = list(topology.dp_metadata_destinations)
+
+    def close(self) -> None:
+        """Close CAMP2P data-plane and recovery-channel resources."""
+
+        self._close_data_plane()
         self.close_recovery_channel()
-        groups = [self.p2p_pg, self.ffn_pg, *self.afd_pg_list]
-        if self.afd_pg is not None and not self.afd_pg_list:
-            groups.append(self.afd_pg)
-        destroyed_group_ids: set[int] = set()
-        for group in groups:
-            if group is not None:
-                group_id = id(group)
-                if group_id in destroyed_group_ids:
-                    continue
-                destroyed_group_ids.add(group_id)
-                dist.destroy_process_group(group)
-        self.p2p_pg = None
-        self.ffn_pg = None
-        self.afd_pg = None
-        self.afd_pg_list = []
-        self.hccl_comm_name = ""
-        self.hccl_comm_name2 = ""
-        self.hccl_comm_name3 = ""
-        self.hccl_comm_name1 = ""
-        self.hccl_comm_name_list = []
-        self._initialized = False
 
     def send_attn_output(
         self,
@@ -531,7 +581,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
         batch_size = _num_tokens_for_ffn_rank(
             self.dp_metadata_list,
             ubatch_idx,
-            ffn_rank=self.role_rank,
+            ffn_rank=self.topology.role_rank,
             attention_size=self.attn_size,
             ffn_size=self.ffn_size,
             fallback=max_num_tokens,
@@ -749,6 +799,38 @@ def build_camp2p_topology(
         min_size=min_size,
         dp_metadata_destinations=tuple(destinations),
     )
+
+
+def build_camp2p_runtime_topology(
+    afd_config: AFDConfig,
+    physical_role_rank: int,
+    runtime_topology: AFDRuntimeTopology,
+) -> _CAMP2PTopology | None:
+    """Map a launch-time physical role rank into a compact recovery rank."""
+
+    physical_ranks = runtime_topology.physical_ranks(afd_config.role)
+    if physical_role_rank not in physical_ranks:
+        return None
+    logical_role_rank = runtime_topology.logical_rank(
+        afd_config.role,
+        physical_role_rank,
+    )
+    runtime_config = replace(
+        afd_config,
+        num_attention_ranks=runtime_topology.attention_size,
+        num_ffn_ranks=runtime_topology.ffn_size,
+    )
+    return build_camp2p_topology(runtime_config, logical_role_rank)
+
+
+def _camp2p_group_name(base_name: str, epoch: int, index: int | None = None) -> str:
+    """Return launch-compatible names with unique recovery epoch suffixes."""
+
+    if index is not None and index > 0:
+        base_name = f"{base_name}{index}"
+    if epoch == 0:
+        return base_name
+    return f"{base_name}_recovery_{epoch}"
 
 
 def _num_tokens_for_ffn_rank(
@@ -1012,6 +1094,7 @@ __all__ = [
     "CAMP2PAFDConnectorData",
     "CAMP2PExtraInfo",
     "CAMP2PTransferState",
+    "build_camp2p_runtime_topology",
     "build_camp2p_topology",
 ]
 

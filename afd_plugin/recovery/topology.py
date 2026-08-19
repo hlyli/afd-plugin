@@ -110,6 +110,15 @@ class AFDRuntimeTopology:
             ffn_physical_ranks=ffn_ranks,
         )
 
+    def next_epoch(self) -> AFDRuntimeTopology:
+        """Create the next epoch without changing rank membership."""
+
+        return AFDRuntimeTopology(
+            epoch=self.epoch + 1,
+            attention_physical_ranks=self.attention_physical_ranks,
+            ffn_physical_ranks=self.ffn_physical_ranks,
+        )
+
     @staticmethod
     def _validate_role_ranks(role: str, ranks: tuple[int, ...]) -> None:
         if any(rank < 0 for rank in ranks):

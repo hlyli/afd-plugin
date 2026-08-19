@@ -56,6 +56,17 @@ def test_coordinator_runs_ordered_recovery_lifecycle():
     assert running.failed_rank is None
 
 
+def test_coordinator_can_advance_epoch_without_changing_membership():
+    coordinator = AFDRecoveryCoordinator(_topology())
+    coordinator.begin_recovery(FailedAFDRank("ffn", 0), reason="transient")
+
+    reconfiguring = coordinator.mark_quiesced(preserve_membership=True)
+
+    assert reconfiguring.topology.epoch == 1
+    assert reconfiguring.topology.ffn_physical_ranks == (0, 1)
+    assert reconfiguring.topology.attention_physical_ranks == (0, 1, 2, 3)
+
+
 def test_coordinator_rejects_stale_epoch():
     coordinator = AFDRecoveryCoordinator(_topology())
     coordinator.begin_recovery(FailedAFDRank("ffn", 1), reason="injected")

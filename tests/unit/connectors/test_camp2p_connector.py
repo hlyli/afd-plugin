@@ -21,8 +21,10 @@ from afd_plugin.connectors.npu.camp2p import (
     CAMP2pAFDConnector,
     CAMP2PExtraInfo,
     CAMP2PTransferState,
+    build_camp2p_runtime_topology,
     build_camp2p_topology,
 )
+from afd_plugin.recovery import AFDRuntimeTopology, FailedAFDRank
 
 
 class _FakeDPMetadata:
@@ -79,6 +81,43 @@ def test_camp2p_factory_creates_connector():
     )
 
     assert isinstance(connector, CAMP2pAFDConnector)
+
+
+def test_camp2p_recovery_group_names_keep_launch_names():
+    assert camp2p_module._camp2p_group_name("afd", 0, 0) == "afd"
+    assert camp2p_module._camp2p_group_name("afd", 0, 1) == "afd1"
+    assert camp2p_module._camp2p_group_name("afd", 2, 1) == "afd1_recovery_2"
+
+
+def test_camp2p_runtime_topology_compacts_surviving_ffn_rank():
+    config = _afd_config(role="ffn")
+    runtime_topology = AFDRuntimeTopology.from_config(config).without_rank(
+        FailedAFDRank("ffn", 0),
+    )
+
+    failed = build_camp2p_runtime_topology(config, 0, runtime_topology)
+    survivor = build_camp2p_runtime_topology(config, 1, runtime_topology)
+
+    assert failed is None
+    assert survivor is not None
+    assert survivor.role_rank == 0
+    assert survivor.world_rank == 0
+    assert survivor.ffn_size == 1
+
+
+def test_camp2p_runtime_topology_preserves_physical_attention_identity():
+    config = _afd_config(role="attention")
+    runtime_topology = AFDRuntimeTopology.from_config(config).without_rank(
+        FailedAFDRank("ffn", 0),
+    )
+
+    survivor = build_camp2p_runtime_topology(config, 3, runtime_topology)
+
+    assert survivor is not None
+    assert survivor.role_rank == 3
+    assert survivor.world_rank == 4
+    assert survivor.attention_size == 4
+    assert survivor.ffn_size == 1
     assert not connector.is_initialized
     assert connector.max_num_reqs == 8
     assert connector.extra_info.core_num == 12

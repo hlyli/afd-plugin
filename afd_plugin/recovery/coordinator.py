@@ -81,14 +81,26 @@ class AFDRecoveryCoordinator:
             self._condition.notify_all()
             return self._snapshot
 
-    def mark_quiesced(self) -> RecoverySnapshot:
-        """Publish the next topology after all surviving ranks stop work."""
+    def mark_quiesced(
+        self,
+        *,
+        preserve_membership: bool = False,
+    ) -> RecoverySnapshot:
+        """Publish the next topology after all participating ranks stop work.
+
+        ``preserve_membership`` supports transient-failure recovery where the
+        failed process remains alive and rejoins a recreated communicator with
+        its original rank.
+        """
 
         with self._condition:
             self._require_phase(RecoveryPhase.QUIESCING)
             failed_rank = self._snapshot.failed_rank
             assert failed_rank is not None
-            next_topology = self._snapshot.topology.without_rank(failed_rank)
+            if preserve_membership:
+                next_topology = self._snapshot.topology.next_epoch()
+            else:
+                next_topology = self._snapshot.topology.without_rank(failed_rank)
             self._snapshot = RecoverySnapshot(
                 RecoveryPhase.RECONFIGURING,
                 next_topology,
