@@ -154,6 +154,9 @@ class AFDConnectorBase(ABC):
     def ensure_recovery_running(self) -> None:
         """Reject new connector work after recovery requests quiescence."""
 
+        channel = self.recovery_channel
+        if channel is not None:
+            channel.wait_until_recovery_ready()
         snapshot = self.recovery_coordinator.snapshot()
         if snapshot.phase is not RecoveryPhase.RUNNING:
             recovery_epoch = snapshot.topology.epoch

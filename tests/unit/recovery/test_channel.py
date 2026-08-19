@@ -66,3 +66,33 @@ def test_channel_rejects_non_positive_poll_interval():
             world_size=1,
             poll_interval_seconds=0,
         )
+
+
+def test_channel_is_ready_before_any_failure_notice():
+    channel = AFDRecoveryChannel(
+        object(),  # type: ignore[arg-type]
+        world_rank=0,
+        world_size=1,
+    )
+
+    channel.wait_until_recovery_ready(timeout_seconds=0.01)
+
+
+def test_channel_records_recovery_callback_failure():
+    def fail_callback(notice):
+        raise RuntimeError(f"cannot recover epoch {notice.epoch}")
+
+    channel = AFDRecoveryChannel(
+        object(),  # type: ignore[arg-type]
+        world_rank=0,
+        world_size=1,
+        notice_callback=fail_callback,
+    )
+
+    assert channel._record_notice(
+        AFDFailureNotice(1, FailedAFDRank("ffn", 0)),
+    )
+    channel.recovery_ready_event.set()
+
+    with pytest.raises(RuntimeError, match="cannot recover epoch 1"):
+        channel.wait_until_recovery_ready(timeout_seconds=0.01)

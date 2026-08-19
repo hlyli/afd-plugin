@@ -19,6 +19,7 @@ from afd_plugin.recovery import (
 
 def _connector() -> SimpleNamespace:
     connector = SimpleNamespace()
+    connector.recovery_channel = None
     connector.recovery_coordinator = AFDRecoveryCoordinator(
         AFDRuntimeTopology.from_config(
             AFDConfig(num_attention_ranks=2, num_ffn_ranks=2),

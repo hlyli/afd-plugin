@@ -116,7 +116,10 @@ class AFDFFNWorker(Worker):
             except InjectedFFNForwardFailure as exc:
                 self._report_injected_failure()
                 if exc.phase == "before_step":
-                    logger.warning("AFD FFN worker injected safe-boundary failure")
+                    self._wait_for_injected_recovery()
+                    logger.warning(
+                        "AFD FFN worker completed safe-boundary recovery",
+                    )
                 else:
                     self._ffn_loop_error = exc
                     logger.exception("Injected AFD FFN worker failure")
@@ -148,6 +151,14 @@ class AFDFFNWorker(Worker):
             ),
         )
 
+    def _wait_for_injected_recovery(self) -> None:
+        """Wait for all original ranks to finish the injected recovery epoch."""
+
+        channel = self.model_runner.connector.recovery_channel
+        if channel is None:
+            raise RuntimeError("Injected FFN recovery has no recovery channel")
+        channel.wait_until_recovery_ready()
+
     def _run_ffn_server_loop(self) -> None:
         event = self._ffn_shutdown_event
         if event is None:
@@ -156,6 +167,7 @@ class AFDFFNWorker(Worker):
         if self.device.type == "cuda":
             torch.cuda.set_device(self.device)
 
+        self._wait_for_peer_safe_boundary_injection()
         while not event.is_set():
             self.model_runner.fault_injector.before_step()
             self.model_runner.connector.ensure_recovery_running()
@@ -188,6 +200,24 @@ class AFDFFNWorker(Worker):
 
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
+
+    def _wait_for_peer_safe_boundary_injection(self) -> None:
+        """Keep peer FFNs off old groups during startup fault injection."""
+
+        connector = self.model_runner.connector
+        config = connector.afd_config
+        target_rank = config.fault_injection_ffn_rank
+        if (
+            config.fault_injection_phase != "before_step"
+            or target_rank is None
+            or connector.role_rank == target_rank
+        ):
+            return
+        channel = connector.recovery_channel
+        if channel is None:
+            raise RuntimeError("Peer FFN recovery has no recovery channel")
+        channel.failure_event.wait()
+        channel.wait_until_recovery_ready()
 
     def raise_ffn_loop_error_if_any(self) -> None:
         error = self._ffn_loop_error

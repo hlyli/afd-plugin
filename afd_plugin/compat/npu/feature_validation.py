@@ -55,6 +55,14 @@ def fail_if_unsupported_npu_afd_features(
                 f"{type(extra_info).__name__}",
             )
         extra_info.validate_supported()
+        if (
+            afd_config.fault_injection_ffn_rank is not None
+            and not bool(vllm_config.model_config.enforce_eager)
+        ):
+            raise RuntimeError(
+                "CAMP2P fault-recovery PoC requires eager execution; graph "
+                "recovery is not implemented yet",
+            )
 
     uses_ubatching = bool(vllm_config.parallel_config.use_ubatching)
     if uses_ubatching and int(vllm_config.parallel_config.num_ubatches) != 2:

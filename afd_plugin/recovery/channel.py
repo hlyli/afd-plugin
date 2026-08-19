@@ -26,6 +26,7 @@ SHUTDOWN_EVENT: Final[int] = 2
 RECOVERY_MESSAGE_FIELDS: Final[int] = 5
 RECOVERY_LISTENER_POLL_SECONDS: Final[float] = 1.0
 RECOVERY_LISTENER_SHUTDOWN_SECONDS: Final[float] = 2.0
+RECOVERY_RECONFIGURATION_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 _ROLE_TO_CODE: Final[dict[str, int]] = {"attention": 1, "ffn": 2}
 _CODE_TO_ROLE: Final[dict[int, AFDRuntimeRole]] = {1: "attention", 2: "ffn"}
@@ -68,9 +69,12 @@ class AFDRecoveryChannel:
         self.poll_interval_seconds = poll_interval_seconds
         self.notice_callback = notice_callback
         self.failure_event = threading.Event()
+        self.recovery_ready_event = threading.Event()
+        self.recovery_ready_event.set()
         self._shutdown_event = threading.Event()
         self._notice_lock = threading.Lock()
         self._latest_notice: AFDFailureNotice | None = None
+        self._recovery_error: str | None = None
         self._outbound_lock = threading.Lock()
         self._outbound_message = _empty_recovery_message()
         self._listener_thread: threading.Thread | None = None
@@ -94,7 +98,10 @@ class AFDRecoveryChannel:
     def report_failure(self, notice: AFDFailureNotice) -> None:
         """Publish one failure notice to every other AFD rank."""
 
-        self._record_notice(notice)
+        # Block local data-plane work immediately, but let the listener process
+        # the notice so every rank invokes callbacks in the same collective
+        # order.
+        self.recovery_ready_event.clear()
         with self._outbound_lock:
             self._outbound_message = encode_failure_notice(notice)
 
@@ -106,6 +113,28 @@ class AFDRecoveryChannel:
             listener.join(timeout=RECOVERY_LISTENER_SHUTDOWN_SECONDS)
         self._shutdown_event.set()
         self._listener_thread = None
+
+    def wait_until_recovery_ready(
+        self,
+        timeout_seconds: float = RECOVERY_RECONFIGURATION_TIMEOUT_SECONDS,
+    ) -> None:
+        """Wait until every original rank finishes handling the latest notice."""
+
+        if timeout_seconds <= 0:
+            raise ValueError("recovery readiness timeout must be positive")
+        if self.recovery_ready_event.is_set():
+            recovery_is_ready = True
+        else:
+            recovery_is_ready = self.recovery_ready_event.wait(timeout_seconds)
+        if not recovery_is_ready:
+            raise TimeoutError(
+                "AFD recovery ranks did not become ready within "
+                f"{timeout_seconds} seconds",
+            )
+        with self._notice_lock:
+            recovery_error = self._recovery_error
+        if recovery_error is not None:
+            raise RuntimeError(recovery_error)
 
     def _listen(self) -> None:
         try:
@@ -119,7 +148,32 @@ class AFDRecoveryChannel:
                 )
                 event = int(message[1].item())
                 if event == FAILURE_EVENT:
-                    self._record_notice(decode_failure_notice(message))
+                    is_new_notice = self._record_notice(
+                        decode_failure_notice(message),
+                    )
+                    if is_new_notice:
+                        # Every original rank retains this CPU group. Callback
+                        # completion means local teardown/rebuild is done (or
+                        # the failed rank has elected not to rejoin).
+                        with self._notice_lock:
+                            local_recovery_succeeded = self._recovery_error is None
+                        recovery_status = torch.tensor(
+                            [int(local_recovery_succeeded)],
+                            dtype=torch.int64,
+                            device="cpu",
+                        )
+                        dist.all_reduce(
+                            recovery_status,
+                            op=dist.ReduceOp.MIN,
+                            group=self.process_group,
+                        )
+                        if int(recovery_status.item()) == 0:
+                            with self._notice_lock:
+                                if self._recovery_error is None:
+                                    self._recovery_error = (
+                                        "AFD recovery failed on another rank"
+                                    )
+                        self.recovery_ready_event.set()
                 elif event == SHUTDOWN_EVENT:
                     self._shutdown_event.set()
                     break
@@ -130,18 +184,26 @@ class AFDRecoveryChannel:
             if not self._shutdown_event.is_set():
                 logger.exception("AFD recovery listener failed")
 
-    def _record_notice(self, notice: AFDFailureNotice) -> None:
+    def _record_notice(self, notice: AFDFailureNotice) -> bool:
         notify = False
         with self._notice_lock:
             current = self._latest_notice
             if current is None or notice.epoch > current.epoch:
                 self._latest_notice = notice
                 self.failure_event.set()
+                self.recovery_ready_event.clear()
+                self._recovery_error = None
                 notify = True
             elif notice == current:
                 self.failure_event.set()
         if notify and self.notice_callback is not None:
-            self.notice_callback(notice)
+            try:
+                self.notice_callback(notice)
+            except Exception as exc:
+                logger.exception("AFD failure-notice callback failed")
+                with self._notice_lock:
+                    self._recovery_error = f"AFD local recovery failed: {exc}"
+        return notify
 
 
 def encode_failure_notice(notice: AFDFailureNotice) -> torch.Tensor:
