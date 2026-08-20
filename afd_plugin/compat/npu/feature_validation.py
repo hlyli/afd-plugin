@@ -63,6 +63,17 @@ def fail_if_unsupported_npu_afd_features(
                 "CAMP2P fault-recovery PoC requires eager execution; graph "
                 "recovery is not implemented yet",
             )
+        if (
+            afd_config.fault_injection_phase == "before_step"
+            and afd_config.fault_injection_ffn_rank is not None
+            and afd_config.fault_injection_ffn_rank
+            != afd_config.num_ffn_ranks - 1
+        ):
+            raise RuntimeError(
+                "CAMP2P startup recovery PoC requires failure of the final FFN "
+                "rank so vLLM Elastic EP can remove the corresponding tail "
+                "Attention ranks",
+            )
 
     uses_ubatching = bool(vllm_config.parallel_config.use_ubatching)
     if uses_ubatching and int(vllm_config.parallel_config.num_ubatches) != 2:
