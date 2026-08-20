@@ -110,6 +110,47 @@ class AFDRuntimeTopology:
             ffn_physical_ranks=ffn_ranks,
         )
 
+    def without_ffn_group(
+        self,
+        failed_rank: FailedAFDRank,
+    ) -> AFDRuntimeTopology:
+        """Remove one FFN and its equally sized contiguous Attention group."""
+
+        if failed_rank.role != "ffn":
+            raise ValueError("FFN-group recovery requires a failed FFN rank")
+        if self.attention_size % self.ffn_size != 0:
+            raise ValueError(
+                "FFN-group recovery requires attention_size to be divisible "
+                f"by ffn_size, got {self.attention_size} and {self.ffn_size}",
+            )
+        try:
+            failed_ffn_index = self.ffn_physical_ranks.index(
+                failed_rank.physical_rank,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"physical FFN rank {failed_rank.physical_rank} is not active "
+                f"in epoch {self.epoch}",
+            ) from exc
+
+        attention_group_size = self.attention_size // self.ffn_size
+        attention_start = failed_ffn_index * attention_group_size
+        attention_end = attention_start + attention_group_size
+        surviving_attention_ranks = (
+            self.attention_physical_ranks[:attention_start]
+            + self.attention_physical_ranks[attention_end:]
+        )
+        surviving_ffn_ranks = tuple(
+            rank
+            for rank in self.ffn_physical_ranks
+            if rank != failed_rank.physical_rank
+        )
+        return AFDRuntimeTopology(
+            epoch=self.epoch + 1,
+            attention_physical_ranks=surviving_attention_ranks,
+            ffn_physical_ranks=surviving_ffn_ranks,
+        )
+
     def next_epoch(self) -> AFDRuntimeTopology:
         """Create the next epoch without changing rank membership."""
 

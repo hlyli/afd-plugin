@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -118,6 +119,34 @@ def test_camp2p_runtime_topology_preserves_physical_attention_identity():
     assert survivor.world_rank == 4
     assert survivor.attention_size == 4
     assert survivor.ffn_size == 1
+
+
+def test_camp2p_runtime_topology_excludes_failed_ffn_attention_group():
+    ffn_config = AFDConfig(
+        connector="CAMP2pAFDConnector",
+        role="ffn",
+        num_attention_ranks=12,
+        num_ffn_ranks=4,
+    )
+    attention_config = replace(ffn_config, role="attention")
+    recovered = AFDRuntimeTopology.from_config(ffn_config).without_ffn_group(
+        FailedAFDRank("ffn", 0),
+    )
+
+    assert build_camp2p_runtime_topology(ffn_config, 0, recovered) is None
+    assert build_camp2p_runtime_topology(attention_config, 0, recovered) is None
+    surviving_ffn = build_camp2p_runtime_topology(ffn_config, 1, recovered)
+    surviving_attention = build_camp2p_runtime_topology(
+        attention_config,
+        3,
+        recovered,
+    )
+
+    assert surviving_ffn is not None
+    assert surviving_ffn.role_rank == 0
+    assert surviving_attention is not None
+    assert surviving_attention.role_rank == 0
+    assert surviving_attention.world_rank == 3
     assert not connector.is_initialized
     assert connector.max_num_reqs == 8
     assert connector.extra_info.core_num == 12

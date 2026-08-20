@@ -411,8 +411,14 @@ class CAMP2pAFDConnector(AFDConnectorBase):
 
         super()._on_failure_notice(notice)
         try:
+            current_topology = self.recovery_coordinator.snapshot().topology
+            next_topology = current_topology.without_ffn_group(
+                notice.failed_rank,
+            )
             self._close_data_plane()
-            snapshot = self.recovery_coordinator.mark_quiesced()
+            snapshot = self.recovery_coordinator.mark_quiesced(
+                next_topology=next_topology,
+            )
             epoch = snapshot.topology.epoch
             runtime_topology = build_camp2p_runtime_topology(
                 self.afd_config,
@@ -757,6 +763,11 @@ def build_camp2p_topology(
         raise ValueError(
             "CAMP2P requires attention_size >= ffn_size, got "
             f"{attention_size} < {ffn_size}",
+        )
+    if attention_size % ffn_size != 0:
+        raise ValueError(
+            "CAMP2P requires attention_size to be divisible by ffn_size, got "
+            f"{attention_size} and {ffn_size}",
         )
     if role_rank < 0:
         raise ValueError(f"CAMP2P role rank must be non-negative, got {role_rank}")

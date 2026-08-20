@@ -33,6 +33,31 @@ def test_topology_rejects_last_ffn_failure():
         topology.without_rank(FailedAFDRank("ffn", 0))
 
 
+def test_ffn_group_failure_preserves_attention_to_ffn_ratio():
+    topology = AFDRuntimeTopology.from_config(
+        AFDConfig(num_attention_ranks=12, num_ffn_ranks=4),
+    )
+
+    recovered = topology.without_ffn_group(FailedAFDRank("ffn", 1))
+
+    assert recovered.epoch == 1
+    assert recovered.attention_physical_ranks == (0, 1, 2, 6, 7, 8, 9, 10, 11)
+    assert recovered.ffn_physical_ranks == (0, 2, 3)
+    assert recovered.attention_size == 9
+    assert recovered.ffn_size == 3
+
+
+def test_ffn_group_failure_requires_integral_ratio():
+    topology = AFDRuntimeTopology(
+        epoch=0,
+        attention_physical_ranks=tuple(range(8)),
+        ffn_physical_ranks=(0, 1, 2),
+    )
+
+    with pytest.raises(ValueError, match="attention_size to be divisible"):
+        topology.without_ffn_group(FailedAFDRank("ffn", 0))
+
+
 def test_failed_rank_rejects_unknown_role():
     with pytest.raises(ValueError, match="unknown AFD runtime role"):
         FailedAFDRank("invalid", 0)  # type: ignore[arg-type]
@@ -65,6 +90,22 @@ def test_coordinator_can_advance_epoch_without_changing_membership():
     assert reconfiguring.topology.epoch == 1
     assert reconfiguring.topology.ffn_physical_ranks == (0, 1)
     assert reconfiguring.topology.attention_physical_ranks == (0, 1, 2, 3)
+
+
+def test_coordinator_can_publish_ffn_group_recovery_topology():
+    coordinator = AFDRecoveryCoordinator(
+        AFDRuntimeTopology.from_config(
+            AFDConfig(num_attention_ranks=12, num_ffn_ranks=4),
+        ),
+    )
+    failed_rank = FailedAFDRank("ffn", 0)
+    coordinator.begin_recovery(failed_rank, reason="group failure")
+    next_topology = coordinator.snapshot().topology.without_ffn_group(failed_rank)
+
+    reconfiguring = coordinator.mark_quiesced(next_topology=next_topology)
+
+    assert reconfiguring.topology.attention_size == 9
+    assert reconfiguring.topology.ffn_size == 3
 
 
 def test_coordinator_rejects_stale_epoch():

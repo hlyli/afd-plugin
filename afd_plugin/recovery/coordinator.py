@@ -85,6 +85,7 @@ class AFDRecoveryCoordinator:
         self,
         *,
         preserve_membership: bool = False,
+        next_topology: AFDRuntimeTopology | None = None,
     ) -> RecoverySnapshot:
         """Publish the next topology after all participating ranks stop work.
 
@@ -97,13 +98,25 @@ class AFDRecoveryCoordinator:
             self._require_phase(RecoveryPhase.QUIESCING)
             failed_rank = self._snapshot.failed_rank
             assert failed_rank is not None
-            if preserve_membership:
-                next_topology = self._snapshot.topology.next_epoch()
+            if preserve_membership and next_topology is not None:
+                raise ValueError(
+                    "preserve_membership and next_topology are mutually exclusive",
+                )
+            if next_topology is not None:
+                expected_epoch = self._snapshot.topology.epoch + 1
+                if next_topology.epoch != expected_epoch:
+                    raise ValueError(
+                        f"next topology epoch is {next_topology.epoch}; expected "
+                        f"{expected_epoch}",
+                    )
+                published_topology = next_topology
+            elif preserve_membership:
+                published_topology = self._snapshot.topology.next_epoch()
             else:
-                next_topology = self._snapshot.topology.without_rank(failed_rank)
+                published_topology = self._snapshot.topology.without_rank(failed_rank)
             self._snapshot = RecoverySnapshot(
                 RecoveryPhase.RECONFIGURING,
-                next_topology,
+                published_topology,
                 failed_rank,
                 self._snapshot.failure_reason,
             )
