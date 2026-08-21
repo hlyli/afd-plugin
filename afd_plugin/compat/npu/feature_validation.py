@@ -71,8 +71,8 @@ def fail_if_unsupported_npu_afd_features(
         ):
             raise RuntimeError(
                 "CAMP2P startup recovery PoC requires failure of the final FFN "
-                "rank so vLLM Elastic EP can remove the corresponding tail "
-                "Attention ranks",
+                "rank so the compatibility patch can retire the corresponding "
+                "tail Attention ranks",
             )
 
     uses_ubatching = bool(vllm_config.parallel_config.use_ubatching)

@@ -255,3 +255,53 @@ def test_engine_core_patch_runs_and_stops_ffn_loop(monkeypatch):
         "raise_ffn_loop_error_if_any",
         "stop_ffn_server_loop",
     ]
+
+
+def test_reconfigure_afd_attention_dp_replaces_surviving_core_group(monkeypatch):
+    _install_fake_vllm_core(monkeypatch)
+    patch_module = _load_patch_module()
+
+    destroyed_groups = []
+    distributed_module = types.ModuleType("vllm.distributed")
+    utils_module = types.ModuleType("vllm.distributed.utils")
+    utils_module.stateless_destroy_torch_distributed_process_group = (
+        destroyed_groups.append
+    )
+    monkeypatch.setitem(sys.modules, "vllm.distributed", distributed_module)
+    monkeypatch.setitem(sys.modules, "vllm.distributed.utils", utils_module)
+
+    new_group = object()
+    new_store = object()
+
+    class ParallelConfig:
+        data_parallel_rank = 2
+        data_parallel_size = 12
+        data_parallel_master_ip = "old"
+        _coord_store_port = 1
+
+        def stateless_init_dp_group(self, return_store=False):
+            assert return_store
+            assert self.data_parallel_size == 9
+            assert self.data_parallel_master_ip == "new"
+            assert self._coord_store_port == 2
+            return new_group, new_store
+
+    rpc_calls = []
+    engine = SimpleNamespace(
+        dp_rank=2,
+        dp_group="old-group",
+        engines_running=True,
+        vllm_config=SimpleNamespace(parallel_config=ParallelConfig()),
+        model_executor=SimpleNamespace(
+            collective_rpc=lambda method, args: rpc_calls.append((method, args)),
+        ),
+    )
+
+    patch_module.reconfigure_afd_attention_dp(engine, 9, "new", 2)
+
+    assert destroyed_groups == ["old-group"]
+    assert engine.dp_group is new_group
+    assert engine.dp_store is new_store
+    assert engine.engines_running is False
+    assert engine._afd_attention_retired is False
+    assert rpc_calls[0][0] == "reconfigure_afd_attention_dp"

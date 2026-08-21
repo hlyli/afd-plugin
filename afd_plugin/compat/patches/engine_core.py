@@ -311,6 +311,13 @@ def run_busy_loop(self):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
+            # ### PATCH START: CAMP2P retired Attention engine
+            # Keep the process and recovery control channel alive, but never
+            # enter scheduler, dummy-forward, or DP collectives again.
+            if getattr(self, "_afd_attention_retired", False):
+                continue
+            # ### PATCH END: CAMP2P retired Attention engine
+
             if self.eep_scaling_state is not None:
                 _ = self.eep_scaling_state.progress()
                 if self.eep_scaling_state.is_complete():
@@ -369,6 +376,63 @@ def run_busy_loop(self):
         self._process_engine_step()
 
     raise SystemExit
+
+
+# Patch reason: CAMP2P startup recovery removes an Attention/FFN group while
+# vLLM 0.19.1 has no non-Elastic-EP API for rebuilding Attention DP groups.
+# Patch functionality: creates replacement EngineCore and worker DP groups for
+# surviving tail-prefix ranks, retires the removed ranks without exiting their
+# processes, and updates the surviving DP configuration.
+# Signature: AFD-only utility method; no upstream method is replaced.
+def reconfigure_afd_attention_dp(
+    self,
+    new_data_parallel_size: int,
+    master_ip: str,
+    coord_store_port: int,
+) -> None:
+    from copy import deepcopy
+
+    from vllm.distributed.utils import (
+        stateless_destroy_torch_distributed_process_group,
+    )
+
+    retire_current_rank = self.dp_rank >= new_data_parallel_size
+    new_dp_group = None
+    new_dp_store = None
+
+    # ### PATCH START: CAMP2P Attention DP reconstruction
+    if not retire_current_rank:
+        new_parallel_config = deepcopy(self.vllm_config.parallel_config)
+        new_parallel_config.data_parallel_size = new_data_parallel_size
+        new_parallel_config.data_parallel_master_ip = master_ip
+        new_parallel_config._coord_store_port = coord_store_port
+        new_dp_group, new_dp_store = new_parallel_config.stateless_init_dp_group(
+            return_store=True,
+        )
+
+    self.model_executor.collective_rpc(
+        "reconfigure_afd_attention_dp",
+        args=(
+            new_data_parallel_size,
+            master_ip,
+            coord_store_port,
+            retire_current_rank,
+        ),
+    )
+
+    stateless_destroy_torch_distributed_process_group(self.dp_group)
+    self._afd_attention_retired = retire_current_rank
+    self.engines_running = False
+    if not retire_current_rank:
+        assert new_dp_group is not None and new_dp_store is not None
+        self.dp_group = new_dp_group
+        self.dp_store = new_dp_store
+        self.vllm_config.parallel_config.data_parallel_size = (
+            new_data_parallel_size
+        )
+        self.vllm_config.parallel_config.data_parallel_master_ip = master_ip
+        self.vllm_config.parallel_config._coord_store_port = coord_store_port
+    # ### PATCH END: CAMP2P Attention DP reconstruction
 
 
 class _AFDFFNKVCacheConfig:
@@ -559,6 +623,9 @@ core_module.EngineCore._initialize_kv_caches = _initialize_kv_caches
 core_module.EngineCore.shutdown = shutdown
 core_module.EngineCoreProc.run_busy_loop = run_busy_loop
 core_module.DPEngineCoreProc.run_busy_loop = run_busy_loop
+core_module.DPEngineCoreProc.reconfigure_afd_attention_dp = (
+    reconfigure_afd_attention_dp
+)
 core_module.logger.debug("AFD EngineCore patch applied")
 
 
